@@ -1,0 +1,263 @@
+# Site-to-Site IPsec VPN Between Two Branch Offices (GNS3)
+
+A lab that connects two branch offices securely over a simulated public network using an **IPsec site-to-site VPN**. It also includes VLAN segmentation, router-on-a-stick inter-VLAN routing, and basic switch security.
+
+---
+
+## Objectives
+
+- Build an IPsec tunnel between Branch-1 and Branch-2 across an ISP router
+- Protect traffic between `192.168.10.0/24` and `192.168.20.0/24` with encryption, integrity checking and authentication
+- Use router-on-a-stick (802.1Q sub-interfaces) for each branch gateway
+- Apply Layer 2 security: PortFast, BPDU Guard, Port Security, and a restricted trunk
+
+---
+
+## Topology
+
+<img width="1077" height="592" alt="Screenshot 2026-09-28 150152" src="https://github.com/user-attachments/assets/851a8940-d2fc-41fb-8241-14c50e9adcea" />
+
+
+| Device | Interface | IP Address | Connected To / Role |
+|---|---|---|---|
+| R1 | g0/0 | 100.100.100.1/30 | ISP (public side) |
+| R1 | f5/0.10 | 192.168.10.254/24 | Gateway for VLAN 10 |
+| ISP | g0/0 | 100.100.100.2/30 | R1 |
+| ISP | g1/0 | 100.100.200.2/30 | R2 |
+| R2 | g1/0 | 100.100.200.1/30 | ISP (public side) |
+| R2 | f5/0.20 | 192.168.20.254/24 | Gateway for VLAN 20 |
+| PC1 | e0 | 192.168.10.1/24 | Branch-1, VLAN 10 |
+| PC2 | e0 | 192.168.20.1/24 | Branch-2, VLAN 20 |
+
+**VLANs:** VLAN 10 (Branch-1) and VLAN 20 (Branch-2)
+
+---
+
+## Tools Used
+
+- GNS3
+- Cisco IOS routers and switches
+- VPCS (end hosts)
+
+---
+
+## IPsec Design
+
+IPsec negotiation happens in two phases.
+
+### Phase 1: IKE (ISAKMP) policy
+Builds a secure management channel between the two routers.
+
+| Parameter | Value |
+|---|---|
+| Authentication | Pre-shared key |
+| Encryption | AES |
+| Hash | SHA-512 |
+| Diffie-Hellman group | 24 |
+| Lifetime | 86400 seconds |
+
+### Phase 2: IPsec transform set
+Protects the actual user data.
+
+| Parameter | Value |
+|---|---|
+| Protocol | ESP |
+| Encryption | AES |
+| Integrity | HMAC-SHA-512 |
+| Mode | Tunnel |
+
+### Interesting traffic
+Only traffic between the two LANs is encrypted (defined by the ACL `vpn-traffic`):
+- R1: `192.168.10.0/24` to `192.168.20.0/24`
+- R2: `192.168.20.0/24` to `192.168.10.0/24`
+
+The ACLs on the two routers **mirror** each other. If they don't match, Phase 2 fails.
+
+---
+
+## Configuration
+
+### Switch-1 (Branch-1)
+
+```
+vlan 10
+ name TEST
+!
+interface e0/1
+ switchport mode access
+ switchport access vlan 10
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+ switchport port-security
+ switchport port-security maximum 1
+!
+interface e0/0
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ switchport trunk allowed vlan 10
+ switchport nonegotiate
+```
+
+### Switch-2 (Branch-2)
+
+```
+vlan 20
+ name TEST
+!
+interface e0/1
+ switchport mode access
+ switchport access vlan 20
+ spanning-tree portfast
+ spanning-tree bpduguard enable
+ switchport port-security
+ switchport port-security maximum 1
+!
+interface e0/0
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ switchport trunk allowed vlan 20
+ switchport nonegotiate
+```
+
+### R1 (Branch-1 Router)
+
+```
+interface f5/0
+ no shutdown
+!
+interface f5/0.10
+ encapsulation dot1q 10
+ ip address 192.168.10.254 255.255.255.0
+!
+interface g0/0
+ ip address 100.100.100.1 255.255.255.252
+ no shutdown
+!
+router ospf 1
+ router-id 1.1.1.1
+ network 192.168.10.0 0.0.0.255 area 0
+ network 100.100.100.0 0.0.0.3 area 0
+!
+! ---- IPsec Phase 1 ----
+crypto isakmp policy 10
+ authentication pre-share
+ encryption aes
+ hash sha512
+ group 24
+ lifetime 86400
+!
+crypto isakmp key CISCO address 100.100.200.1 255.255.255.252
+!
+! ---- IPsec Phase 2 ----
+crypto ipsec transform-set ipsec-vpn esp-aes esp-sha512-hmac
+ mode tunnel
+!
+ip access-list extended vpn-traffic
+ permit ip 192.168.10.0 0.0.0.255 192.168.20.0 0.0.0.255
+!
+crypto map vpn-map 10 ipsec-isakmp
+ set peer 100.100.200.1
+ set transform-set ipsec-vpn
+ match address vpn-traffic
+!
+interface g0/0
+ crypto map vpn-map
+```
+
+### R2 (Branch-2 Router)
+
+```
+interface f5/0
+ no shutdown
+!
+interface f5/0.20
+ encapsulation dot1q 20
+ ip address 192.168.20.254 255.255.255.0
+!
+interface g1/0
+ ip address 100.100.200.1 255.255.255.252
+ no shutdown
+!
+router ospf 1
+ router-id 3.3.3.3
+ network 192.168.20.0 0.0.0.255 area 0
+ network 100.100.200.0 0.0.0.3 area 0
+!
+! ---- IPsec Phase 1 ----
+crypto isakmp policy 10
+ authentication pre-share
+ encryption aes
+ hash sha512
+ group 24
+ lifetime 86400
+!
+crypto isakmp key CISCO address 100.100.100.1 255.255.255.252
+!
+! ---- IPsec Phase 2 ----
+crypto ipsec transform-set ipsec-vpn esp-aes esp-sha512-hmac
+ mode tunnel
+!
+ip access-list extended vpn-traffic
+ permit ip 192.168.20.0 0.0.0.255 192.168.10.0 0.0.0.255
+!
+crypto map vpn-map 10 ipsec-isakmp
+ set peer 100.100.100.1
+ set transform-set ipsec-vpn
+ match address vpn-traffic
+!
+interface g1/0
+ crypto map vpn-map
+```
+
+### End hosts (VPCS)
+
+```
+PC1> ip 192.168.10.1/24 192.168.10.254
+PC2> ip 192.168.20.1/24 192.168.20.254
+```
+
+---
+
+## Verification
+
+Run these commands on R1 or R2 after sending traffic between the PCs.
+
+| Command | What to look for |
+|---|---|
+| `ping 192.168.20.1` (from PC1) | Replies received. The first packet may time out while the tunnel is being built. |
+| `show crypto isakmp sa` | Peer listed with state `QM_IDLE` (Phase 1 is up) |
+| `show crypto ipsec sa` | `#pkts encaps` and `#pkts decaps` increasing (traffic is being encrypted and decrypted) |
+| `show crypto map` | Crypto map applied to the WAN interface with the correct peer |
+| `show ip route` | Routes to the remote branch and public peer |
+
+### Screenshots
+
+<!-- Replace with your own screenshots -->
+<img width="1077" height="402" alt="Screenshot 2026-09-28 144431" src="https://github.com/user-attachments/assets/a7618989-5b99-4b07-bdc1-bfa892fcdc94" />
+<img width="1086" height="986" alt="Screenshot 2026-09-28 111513" src="https://github.com/user-attachments/assets/ab172f9f-3bcf-4506-bd97-1d7612c0544d" />
+
+
+## Key Learnings
+
+- The four IPsec functions: authentication, data integrity, confidentiality and anti-replay
+- The difference between IKE Phase 1 (management tunnel) and Phase 2 (data tunnel)
+- How the crypto ACL defines which traffic is protected, and why both sides must mirror it
+- Applying a crypto map to the correct interface
+- Combining VLANs, router-on-a-stick and Layer 2 security features in one design
+
+---
+
+## Possible Improvements
+
+- Use a strong, unique pre-shared key (the lab uses a simple key)
+- Use static or default routes toward the ISP instead of advertising private networks in OSPF
+- Add ACLs and NAT for internet access alongside the VPN
+- Try a newer setup such as IKEv2 or a VTI-based tunnel
+
+---
+
+## Author
+
+**Amir Islam**
+Network Associate | CCNA
+[LinkedIn](https://linkedin.com/in/amir-islam-845697323) | [GitHub](https://github.com/Amir-IT-Labs)
